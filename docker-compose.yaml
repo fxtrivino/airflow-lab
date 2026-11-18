@@ -1,0 +1,178 @@
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: airflow-data-engineering:3.1.5
+  env_file:
+    - .env
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    # Variables existentes
+    PYTHONPATH: /opt/airflow/etl/src
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_DB_CONNECTION:?Required}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AIRFLOW_CONFIG: /opt/airflow/config/airflow.cfg
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./config:/opt/airflow/config
+    - ./plugins:/opt/airflow/plugins
+    # Código existente del laboratorio ETL
+    - ../misproyectospython/python-data-engineering-lab:/opt/airflow/etl:ro
+    # ... volúmenes existentes
+    - ./output:/opt/airflow/output
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?Required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Required}
+      POSTGRES_DB: ${POSTGRES_DB:?Required}
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  airflow-init:
+    <<: *airflow-common
+    command: version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USERNAME:?Required}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:?Required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8085:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    networks:
+      - default
+      - data-engineering-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+      airflow-apiserver:
+        condition: service_started
+    restart: unless-stopped
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  spark-etl:
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    image: spark-incremental-etl:local
+    container_name: spark-incremental-etl
+
+    working_dir: /opt/spark-etl
+
+    volumes:
+      - ../pyspark-delta-incremental-etl:/opt/spark-etl
+      - ./spark/runner:/opt/spark-runner:ro
+
+    environment:
+      PYTHONPATH: /opt/spark-etl/src
+      SPARK_LOCAL_IP: 127.0.0.1
+
+    command:
+      - python
+      - -m
+      - uvicorn
+      - app:app
+      - --app-dir
+      - /opt/spark-runner
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+
+    expose:
+      - "8000"
+
+    restart: unless-stopped
+
+  dbt-runner:
+    build:
+      context: ./dbt
+      dockerfile: Dockerfile
+
+    image: dbt-snowflake-runner:1.12.6
+    container_name: dbt-snowflake-runner
+
+    working_dir: /opt/dbt/project
+
+    volumes:
+      - ../snowflake-dbt-data-engineering/snowflake_data_platform:/opt/dbt/project
+      - ./dbt/profiles:/opt/dbt/profiles:ro
+      - ${HOME}/.snowflake/keys/dbt_rsa_key.p8:/opt/dbt/keys/dbt_rsa_key.p8:ro
+      - ./dbt/runner:/opt/dbt/runner:ro
+      - ./dbt/artifacts:/opt/dbt/artifacts
+      - ../snowflake-dbt-data-engineering/data:/opt/dbt/data:ro
+
+    environment:
+      DBT_PROFILES_DIR: /opt/dbt/profiles
+      DBT_PRIVATE_KEY_PASSPHRASE: ${DBT_PRIVATE_KEY_PASSPHRASE:?Passphrase required}
+
+    command:
+      - uvicorn
+      - app:app
+      - --app-dir
+      - /opt/dbt/runner
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "1"
+
+    expose:
+      - "8000"
+
+    restart: unless-stopped
+
+volumes:
+  postgres-db-volume:
+
+networks:
+  data-engineering-network:
+    external: true
+    name: python-data-engineering-lab_default

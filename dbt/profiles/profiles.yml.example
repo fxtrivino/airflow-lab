@@ -1,0 +1,15 @@
+snowflake_data_platform:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: YOUR_SNOWFLAKE_ACCOUNT
+      user: YOUR_SNOWFLAKE_USER
+      role: DBT_DEVELOPER
+      database: DATA_ENGINEERING_LAB
+      warehouse: DE_LAB_WH
+      schema: STAGING
+      threads: 4
+
+      private_key_path: /opt/dbt/keys/dbt_rsa_key.p8
+      private_key_passphrase: "{{ env_var('DBT_PRIVATE_KEY_PASSPHRASE') }}"

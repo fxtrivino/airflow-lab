@@ -1,0 +1,4 @@
+dbt-core==1.12.6
+dbt-snowflake==1.12.5
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
